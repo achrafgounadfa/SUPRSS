@@ -1,4 +1,4 @@
-/*// Auteur : Gounadfa Achraf - SUPRSS Project
+// Auteur : Gounadfa Achraf 
 // Modèle Mongoose pour les collections de flux RSS
 
 const mongoose = require('mongoose');
@@ -296,19 +296,33 @@ collectionSchema.methods.generateInviteCode = function() {
 
 // Méthode pour mettre à jour les statistiques
 collectionSchema.methods.updateStats = async function() {
-  // Cette méthode sera appelée après l'ajout/suppression d'articles
+  // Cette méthode est appelée après l'ajout ou la suppression d'articles.
+  // On calcule les statistiques globales de la collection sans dépendre d'un utilisateur spécifique.
   const Feed = mongoose.model('Feed');
   const Article = mongoose.model('Article');
-  
+
+  // Récupérer tous les flux liés à cette collection
   const feeds = await Feed.find({ _id: { $in: this.feeds } });
-  const articles = await Article.find({ feed: { $in: this.feeds } });
-  
+
+  // Compter le nombre total d'articles dans ces flux
+  const totalArticles = await Article.countDocuments({ feed: { $in: this.feeds } });
+
+  // Compter les articles non lus globalement = aucun lecteur (readBy absent ou vide)
+  const unreadArticles = await Article.countDocuments({
+    feed: { $in: this.feeds },
+    $or: [
+      { readBy: { $exists: false } },
+      { readBy: { $size: 0 } }
+    ]
+  });
+
+  // Mettre à jour les statistiques
   this.stats.totalFeeds = feeds.length;
   this.stats.activeFeeds = feeds.filter(f => f.isActive).length;
-  this.stats.totalArticles = articles.length;
-  this.stats.unreadArticles = articles.filter(a => !a.isRead).length;
+  this.stats.totalArticles = totalArticles;
+  this.stats.unreadArticles = unreadArticles;
   this.stats.lastUpdated = new Date();
-  
+
   return this.save();
 };
 
@@ -332,251 +346,6 @@ collectionSchema.statics.findUserCollections = async function(userId) {
   }).populate('feeds', 'name url');
 };
 
-const Collection = mongoose.model('Collection', collectionSchema);
-
-module.exports = Collection;*/
-
-////////////////////////////////////////////////////////////
-// Auteur : Gounadfa Achraf - SUPRSS Project
-// Modèle Mongoose pour les collections d'articles
-
-const mongoose = require('mongoose');
-
-// Schéma pour les collections
-const collectionSchema = new mongoose.Schema({
-  // Nom de la collection
-  name: {
-    type: String,
-    required: [true, 'Le nom de la collection est requis'],
-    trim: true,
-    maxlength: [100, 'Le nom ne peut pas dépasser 100 caractères']
-  },
-
-  // Description optionnelle
-  description: {
-    type: String,
-    trim: true,
-    maxlength: [500, 'La description ne peut pas dépasser 500 caractères']
-  },
-
-  // Propriétaire de la collection
-  owner: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-
-  // Membres avec rôles (reader, contributor, admin)
-  members: [{
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User'
-    },
-    role: {
-      type: String,
-      enum: ['reader', 'contributor', 'admin'],
-      default: 'reader'
-    },
-    joinedAt: {
-      type: Date,
-      default: Date.now
-    }
-  }],
-
-  // Flux RSS associés
-  feeds: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Feed'
-  }],
-
-  // Visibilité de la collection
-  visibility: {
-    type: String,
-    enum: ['private', 'public', 'shared'],
-    default: 'private'
-  },
-
-  // Statistiques de la collection
-  stats: {
-    totalArticles: {
-      type: Number,
-      default: 0
-    },
-    unreadArticles: {
-      type: Number,
-      default: 0
-    },
-    totalFeeds: {
-      type: Number,
-      default: 0
-    },
-    activeFeeds: {
-      type: Number,
-      default: 0
-    },
-    lastUpdated: {
-      type: Date,
-      default: Date.now
-    }
-  },
-
-  // Code d'invitation pour rejoindre la collection
-  inviteCode: {
-    type: String,
-    unique: true,
-    sparse: true
-  },
-
-  // Tags personnalisés
-  tags: [{
-    type: String,
-    trim: true
-  }],
-
-  // Couleur et icône de la collection
-  color: {
-    type: String,
-    default: '#000000'
-  },
-  icon: {
-    type: String,
-    default: '📁'
-  },
-
-  // Statut de la collection
-  isActive: {
-    type: Boolean,
-    default: true
-  },
-  isArchived: {
-    type: Boolean,
-    default: false
-  },
-
-  // Dates de création et dernière activité
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  lastActivity: {
-    type: Date,
-    default: Date.now
-  }
-
-}, {
-  timestamps: true
-});
-
-// ============================================================
-// Méthodes et middlewares
-// ============================================================
-
-// Vérifie si un utilisateur est membre de la collection
-collectionSchema.methods.isMember = function (userId) {
-  if (!userId) return false;
-  if (this.owner.toString() === userId.toString()) return true;
-  return this.members.some(m => m.user.toString() === userId.toString());
-};
-
-// Génère un code d'invitation unique
-collectionSchema.methods.generateInviteCode = function () {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let code = '';
-  for (let i = 0; i < 8; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  this.inviteCode = code;
-  return code;
-};
-
-// ✅ Vérifie les permissions d'un utilisateur (ajouté pour éviter l'erreur)
-collectionSchema.methods.userHasPermission = function (userId, permission) {
-  // Si aucun userId → pas de permission
-  if (!userId) return false;
-
-  // Le propriétaire a tous les droits
-  if (this.owner.toString() === userId.toString()) {
-    return true;
-  }
-
-  // On récupère le membre correspondant
-  const member = this.members.find(m => m.user.toString() === userId.toString());
-  if (!member) return false;
-
-  // Les admins ont tous les droits
-  if (member.role === 'admin') {
-    return true;
-  }
-
-  // Les contributeurs ont un jeu de permissions limité
-  const contributorPermissions = [
-    'canAddFeeds',
-    'canRemoveFeeds',
-    'canInviteMembers',
-    'canEditSettings',
-    'canComment',
-    'canChat'
-  ];
-  if (member.role === 'contributor' && contributorPermissions.includes(permission)) {
-    return true;
-  }
-
-  // Les lecteurs n’ont aucun droit d’édition (juste lecture/commentaire)
-  return false;
-};
-
-// Met à jour les statistiques de la collection
-collectionSchema.methods.updateStats = async function () {
-  // On met à jour les stats globales de la collection sans dépendre d'un utilisateur
-  const Feed = mongoose.model('Feed');
-  const Article = mongoose.model('Article');
-
-  // Récupère les flux de la collection
-  const feeds = await Feed.find({ _id: { $in: this.feeds } });
-
-  // Compte tous les articles de ces flux
-  const totalArticles = await Article.countDocuments({ feed: { $in: this.feeds } });
-
-  // Compte les articles non lus (aucun utilisateur dans readBy)
-  const unreadArticles = await Article.countDocuments({
-    feed: { $in: this.feeds },
-    $or: [
-      { readBy: { $exists: false } },
-      { readBy: { $size: 0 } }
-    ]
-  });
-
-  // Met à jour les stats
-  this.stats.totalFeeds = feeds.length;
-  this.stats.activeFeeds = feeds.filter(f => f.isActive).length;
-  this.stats.totalArticles = totalArticles;
-  this.stats.unreadArticles = unreadArticles;
-  this.stats.lastUpdated = new Date();
-
-  return this.save();
-};
-
-// Met à jour lastActivity à chaque sauvegarde
-collectionSchema.pre('save', function (next) {
-  if (this.isModified()) {
-    this.lastActivity = new Date();
-  }
-  next();
-});
-
-// Retourne toutes les collections visibles pour un utilisateur
-collectionSchema.statics.findUserCollections = async function (userId) {
-  return this.find({
-    $or: [
-      { owner: userId },
-      { 'members.user': userId }
-    ],
-    isActive: true,
-    isArchived: false
-  }).populate('feeds', 'name url');
-};
-
-// Création du modèle
 const Collection = mongoose.model('Collection', collectionSchema);
 
 module.exports = Collection;
